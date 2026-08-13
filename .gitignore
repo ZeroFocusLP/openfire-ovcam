@@ -1,0 +1,7 @@
+.pio/
+.cache/
+.vscode/
+__pycache__/
+*.log
+compile_commands.json
+OpenFIRE-Firmware-ESP32/
