@@ -322,6 +322,7 @@ uint8_t SCCB_Read16(uint8_t slv_addr, uint16_t reg)
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "W [%04x]=%02x fail\n", reg, rx_buffer[0]);
+        sccb_read_failed = true;
     }
 
     return rx_buffer[0];

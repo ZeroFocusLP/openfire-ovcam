@@ -21,21 +21,7 @@
 #include "esp_heap_caps.h"      // v16: MEM line (PSRAM presence + DRAM headroom)
 #include "screen_detector.h"
 
-// Freenove S3-WROOM CAM pin map (matches firmware/src/board_esp32s3.h)
-#define P_XCLK 15
-#define P_SIOD 4
-#define P_SIOC 5
-#define P_D7 16
-#define P_D6 17
-#define P_D5 18
-#define P_D4 12
-#define P_D3 10
-#define P_D2 8
-#define P_D1 9
-#define P_D0 11
-#define P_VSYNC 6
-#define P_HREF 7
-#define P_PCLK 13
+#include "camera_pins.h"
 
 // ===========================================================================
 // v28 DIAGNOSTIC BUILD SWITCH
@@ -1108,10 +1094,7 @@ int ov2640_capture_start(void)
     c.pin_d3 = P_D3; c.pin_d2 = P_D2; c.pin_d1 = P_D1; c.pin_d0 = P_D0;
     c.pin_vsync = P_VSYNC; c.pin_href = P_HREF; c.pin_pclk = P_PCLK;
     c.ledc_timer = LEDC_TIMER_0; c.ledc_channel = LEDC_CHANNEL_0;
-    c.xclk_freq_hz = 27000000;                       // 136fps is ribbon-safe with pdiv=3:
-                                                     // the ribbon limit is DVP BUS rate,
-                                                     // not sensor rate — the divider slows
-                                                     // the bus while the sensor runs 136fps
+    c.xclk_freq_hz = CAMERA_DEFAULT_XCLK_FREQ;
     c.pixel_format = PIXFORMAT_GRAYSCALE;
     c.frame_size = FRAMESIZE_HQVGA;
     c.fb_count = 2;
@@ -1152,6 +1135,14 @@ int ov2640_capture_start(void)
 #endif  // LIGHTGUN_DIAG (ALIGN/RING geometry report)
     sensor_t* s = esp_camera_sensor_get();
     s_sensor = s;
+    const char* sensor_name = "Unknown";
+    if (s) {
+        if (s->id.PID == OV2640_PID) sensor_name = "OV2640";
+        else if (s->id.PID == OV3660_PID) sensor_name = "OV3660";
+        else if (s->id.PID == OV5640_PID) sensor_name = "OV5640";
+        printf("SENSOR: %s (PID 0x%04X, MID 0x%04X) on %s\n",
+               sensor_name, s->id.PID, (s->id.MIDH << 8) | s->id.MIDL, CAMERA_BOARD_NAME);
+    }
     // v15 SCCB ACK CHECK + RETRY — parity with the lab's apply_sensor_regs().
     // The lab learned this the hard way (its v46): "a transient NACK on the
     // 0xFF bank-select left all later writes landing in the WRONG BANK ->
@@ -1173,24 +1164,26 @@ int ov2640_capture_start(void)
         // (period-doubling note: tracks scene darkness, not aec; the v9 frame
         // gate rejects those frames — 2 events in 12s seen on the LED bench,
         // both would be gated.)
-        rc |= s->set_reg(s, 0x112, 0x02, 0x00);      // v15 (lab parity): COM7[1] test pattern OFF
-        rc |= s->set_reg(s, 0x113, 0x20, 0x00);      // banding filter off
-        rc |= s->set_reg(s, 0x113, 0x01, 0x00);      // v15 (lab parity): COM8[0] AEC enable bit clear
-        rc |= s->set_reg(s, 0x103, 0xC0, 0x00);      // COM1: no dummy frames
-        // v9 datasheet-verified frame-timing kill list (Table 13):
-        rc |= s->set_reg(s, 0x12D, 0xFF, 0x00); rc |= s->set_reg(s, 0x12E, 0xFF, 0x00); // ADDVSL/H: VSYNC width +0 lines
-        // NOTE 0x12A (REG2A[7:4]) is an OVERLAY-ONLY write — the lab never
-        // touches it. Its reset value is 0 and we write 0, so it is a no-op in
-        // practice; kept, but recorded here so the difference is not silent.
-        rc |= s->set_reg(s, 0x12A, 0xF0, 0x00);      // REG2A[7:4]: line-interval adj MSBs = 0
-        rc |= s->set_reg(s, 0x12B, 0xFF, 0x00);      // FRARL: line-interval adj LSBs = 0
-        rc |= s->set_reg(s, 0x146, 0xFF, 0x00); rc |= s->set_reg(s, 0x147, 0xFF, 0x00); // FLL/FLH: frame length +0
-        rc |= s->set_reg(s, 0x111, 0xFF, 0x80);      // CLKRC: 2x, div 1
-        rc |= s->set_reg(s, 0x132, 0xFF, 0x89);      // REG32 CIF (r32=0 form)
-        rc |= s->set_reg(s, 0x0D3, 0xFF, 0x03);      // v10: pdiv=3 — THE 136fps unlock
-                                                     // (DVP bus slowed, sensor full rate)
-        // MUST be last: REG45 low bits belong to AEC (set above); only [7:6]
-        rc |= s->set_reg(s, 0x145, 0xC0, BOOT_BOOST ? 0xC0 : 0x00);   // v21: OFF
+        if (s->id.PID == OV2640_PID) {
+            rc |= s->set_reg(s, 0x112, 0x02, 0x00);      // v15 (lab parity): COM7[1] test pattern OFF
+            rc |= s->set_reg(s, 0x113, 0x20, 0x00);      // banding filter off
+            rc |= s->set_reg(s, 0x113, 0x01, 0x00);      // v15 (lab parity): COM8[0] AEC enable bit clear
+            rc |= s->set_reg(s, 0x103, 0xC0, 0x00);      // COM1: no dummy frames
+            // v9 datasheet-verified frame-timing kill list (Table 13):
+            rc |= s->set_reg(s, 0x12D, 0xFF, 0x00); rc |= s->set_reg(s, 0x12E, 0xFF, 0x00); // ADDVSL/H: VSYNC width +0 lines
+            // NOTE 0x12A (REG2A[7:4]) is an OVERLAY-ONLY write — the lab never
+            // touches it. Its reset value is 0 and we write 0, so it is a no-op in
+            // practice; kept, but recorded here so the difference is not silent.
+            rc |= s->set_reg(s, 0x12A, 0xF0, 0x00);      // REG2A[7:4]: line-interval adj MSBs = 0
+            rc |= s->set_reg(s, 0x12B, 0xFF, 0x00);      // FRARL: line-interval adj LSBs = 0
+            rc |= s->set_reg(s, 0x146, 0xFF, 0x00); rc |= s->set_reg(s, 0x147, 0xFF, 0x00); // FLL/FLH: frame length +0
+            rc |= s->set_reg(s, 0x111, 0xFF, 0x80);      // CLKRC: 2x, div 1
+            rc |= s->set_reg(s, 0x132, 0xFF, 0x89);      // REG32 CIF (r32=0 form)
+            rc |= s->set_reg(s, 0x0D3, 0xFF, 0x03);      // v10: pdiv=3 — THE 136fps unlock
+                                                         // (DVP bus slowed, sensor full rate)
+            // MUST be last: REG45 low bits belong to AEC (set above); only [7:6]
+            rc |= s->set_reg(s, 0x145, 0xC0, BOOT_BOOST ? 0xC0 : 0x00);   // v21: OFF
+        }
         if (rc == 0) break;
         printf("SCCB: recipe pass %d NACKed (rc=%d) - retrying\n", tries + 1, rc);
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -1294,9 +1287,12 @@ extern "C" void ov2640_tune(const char* cmd)
         } else if (s_sensor) {
             if      (!strcmp(key, "aec"))   { s_sensor->set_aec_value(s_sensor, val); s_cfg_aec = val; }
             else if (!strcmp(key, "agc"))   { s_sensor->set_agc_gain(s_sensor, val);  s_cfg_agc = val; }
-            else if (!strcmp(key, "boost")) { s_sensor->set_reg(s_sensor, 0x145, 0xC0,
-                                                                val ? 0xC0 : 0x00);
-                                              s_cfg_boost = val ? 1 : 0; }
+            else if (!strcmp(key, "boost")) {
+                if (s_sensor->id.PID == OV2640_PID) {
+                    s_sensor->set_reg(s_sensor, 0x145, 0xC0, val ? 0xC0 : 0x00);
+                }
+                s_cfg_boost = val ? 1 : 0;
+            }
         }
     }
     // "CMD ok" prefix: dashboard.py runs parse_kv() on it, so its panel picks
