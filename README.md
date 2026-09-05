@@ -1,83 +1,201 @@
-# openfire-ov2640-overlay
+# OpenFire OVCam
 
-An **OV2640 camera backend for [OpenFIRE](https://github.com/alessandro-satanassi/OpenFIRE-Firmware-ESP32)** on the ESP32-S3 — a drop-in replacement for the DFRobot/PAJ7025 IR camera that OpenFIRE normally requires, built from a ~$10 camera dev board and an IR-pass filter.
+OpenFire OVCam is an ESP32-S3 camera backend and vision layer for the OpenFIRE lightgun ecosystem.
 
-OpenFIRE itself is **not modified and not vendored**: you clone it next to this project and this project builds it as-is. Our camera stack shadows OpenFIRE's `DFRobotIRPositionEx` class with one that is fed by an OV2640 instead of an I²C IR camera.
+The project started as a low-cost replacement for OpenFIRE's usual DFRobot/PAJ7025 IR positioning camera, using commodity OmniVision sensors. It has since expanded to support **IR-free visible-screen tracking** on modern displays while preserving normal OpenFIRE compatibility.
 
-## What's inside
+The current product direction is simple:
 
-| Piece | What it does |
-|---|---|
-| `lib/OV2640Capture/` | Capture core: streaming blob detector that runs **inside the camera driver's DMA chunk callback** (no framebuffer post-pass), duplicate/smear filtering, and a **quad resolver** that maintains persistent corner identity and reconstructs briefly-missing corners from a continuously-learned rigid model — so OpenFIRE always sees 4 stable, correctly-labelled points |
-| `lib/DFRobotIRPositionEx_OV2640/` | The shim: OpenFIRE-compatible `DFRobotIRPositionEx` served from the camera stream via a lock-free seqlock bridge |
-| `lib/esp32-camera-ov2640/` | Vendored esp32-camera driver (Apache-2.0, Espressif) with capture-robustness patches — see `lib/esp32-camera-ov2640/MODIFICATIONS.md` |
-| `harness/` | Standalone bring-up firmware: the camera stack alone, no OpenFIRE, full serial telemetry — flash this first |
-| `tools/` | `dashboard.py` (live point map + tuning console) and `health.py` (PASS/FAIL health scoring) |
-| `test/` | Host-side unit tests (no hardware needed), including 22 scenarios for the quad resolver |
+> **Make a low-cost open lightgun that can track modern TVs without external IR emitters, while retaining conventional 4-point IR tracking as a fallback.**
 
-## Hardware
+## Current status
 
-* **Freenove ESP32-S3-WROOM CAM** (N8R8: 8 MB flash + 8 MB octal PSRAM) or compatible ESP32-S3 board with an OV2640
-* OV2640 camera module with the IR-blocking filter removed and an **IR-pass filter** (~700 nm long-pass) fitted
-* 4 IR LED emitters arranged as a rectangle around the screen (OpenFIRE's 4-point square/diamond layouts)
-* Wiring for trigger/buttons/solenoid/rumble per `platformio.ini` (`; ---- wiring` section — **adjust the pin defines to your gun**)
+- **OpenFIRE integration:** working through a drop-in `DFRobotIRPositionEx` shim.
+- **Traditional 4-point IR mode:** working and hardware-tested with the OV2640 path.
+- **Visible-screen modes:** implemented for screen-border tracking and corner/fiducial tracking.
+- **Modern cameras:** OV2640, OV3660, and OV5640 driver support.
+- **Seeed Studio XIAO ESP32S3 Sense:** supported as the compact reference platform.
+- **OV3660:** verified at approximately **45 FPS** on hardware with stable frame delivery.
+- **Diagnostics:** standalone harness, live dashboard, health scoring, runtime tuning, and host-side detector tests.
 
-Camera pinout is the Freenove S3 CAM mapping, defined at the top of `lib/OV2640Capture/ov2640_capture.cpp`.
+The immediate milestone is **real gameplay validation**: run an actual lightgun game using visible-screen tracking, then calibrate and tune the system based on real aiming behavior before doing further camera or product optimization.
 
-## Build & flash
+See [`docs/GOAL.md`](docs/GOAL.md) for the roadmap and [`docs/CHANGELOG.md`](docs/CHANGELOG.md) for measured progress.
 
-Requires [PlatformIO](https://platformio.org/) (CLI or VS Code extension) and Python 3 with `pyserial` for the tools.
+---
 
+## Architecture
+
+OpenFire OVCam deliberately keeps OpenFIRE separate from this repository.
+
+```text
+openfire-ovcam/
+├── OpenFIRE-Firmware-ESP32/   # local checkout, intentionally git-ignored
+├── lib/
+│   ├── OV2640Capture/         # capture + IR blobs + visible-screen detector
+│   ├── DFRobotIRPositionEx_OV2640/
+│   └── esp32-camera-ov2640/   # patched camera driver
+├── harness/                   # standalone camera bring-up and telemetry
+├── tools/                     # dashboard, health checks, screen patterns
+├── test/                      # host-side geometry / detector tests
+└── platformio.ini
 ```
-git clone <this repo>
-cd openfire-ov2640-overlay
 
-# OpenFIRE upstream, side by side (NOT a fork, never edited):
+OpenFIRE itself is **not vendored and not tracked as a submodule**. The build expects a local checkout at:
+
+```text
+OpenFIRE-Firmware-ESP32/
+```
+
+That directory is intentionally listed in `.gitignore` so this repository only carries the OVCam-specific camera, vision, integration, and tooling changes.
+
+The tested upstream revision should be checked out locally before building. At the time of writing, the known-good baseline is:
+
+```text
+f8f9bf265c4813f659bd49768378be6bf3cfee74
+```
+
+The build then compiles OpenFIRE's sources from that local directory while the project-local camera shim shadows OpenFIRE's normal positioning-camera implementation.
+
+---
+
+## Tracking modes
+
+### 1. Visible screen border
+
+A high-contrast border is displayed around the game image. The camera detects the four screen edges and reconstructs the screen quadrilateral.
+
+This is currently the most promising IR-free path for early gameplay testing because it provides strong geometric structure and does not rely on external hardware around the television.
+
+### 2. Visible corner / fiducial tracking
+
+The camera detects bright corner markers or brackets shown on the display. This mode is intended to reduce the amount of visible tracking graphics once robustness against real game content is proven.
+
+### 3. Conventional 4-point IR
+
+The camera tracks four IR emitters arranged around the display, preserving the standard OpenFIRE-style workflow as a compatibility and fallback mode.
+
+---
+
+## Supported hardware
+
+### Development platform
+
+- **Freenove ESP32-S3 WROOM CAM**
+- Useful for camera development, diagnostics, and bench testing.
+
+### Compact reference platform
+
+- **Seeed Studio XIAO ESP32S3 Sense**
+- Intended for compact integration inside practical lightgun shells.
+- Supports the project camera path plus reserved GPIO for:
+  - trigger
+  - A/B/C buttons
+  - Start / Select
+  - solenoid
+  - rumble
+  - NeoPixel
+  - shared I2C for IMU and optional OLED
+
+### Camera sensors
+
+- **OV2640** — legacy high-FPS path, useful for IR tracking and historical compatibility.
+- **OV3660** — current preferred modern sensor for product validation; hardware-tested at ~45 FPS.
+- **OV5640** — supported in the camera driver for further experimentation.
+
+---
+
+## Build setup
+
+### 1. Clone this repository
+
+```bash
+git clone https://github.com/ZeroFocusLP/openfire-ovcam.git
+cd openfire-ovcam
+```
+
+### 2. Clone OpenFIRE locally into the expected ignored directory
+
+```bash
 git clone https://github.com/alessandro-satanassi/OpenFIRE-Firmware-ESP32.git
-# tested against commit f8f9bf2 (v6.2.1-7-gf8f9bf2); newer commits usually
-# work because the shim boundary is narrow, but that one is known-good:
+```
+
+This must produce:
+
+```text
+openfire-ovcam/OpenFIRE-Firmware-ESP32/
+```
+
+Then check out the tested revision:
+
+```bash
 git -C OpenFIRE-Firmware-ESP32 checkout f8f9bf265c4813f659bd49768378be6bf3cfee74
-
-pio run -t upload          # shipping build (default env: combined_s3_freenove)
 ```
 
-The boot banner (USB serial or UART0, 115200) is the stale-build check — it must read:
+Do not add that directory to this repository; it is intentionally excluded by `.gitignore`.
 
-```
-OV2640Capture v28 SHIP | thr=80 aec=40 agc=2 boost=0 ...
-```
+### 3. Build
 
-If the version or `SHIP`/`DIAG` tag doesn't match what you flashed, run `pio run -t fullclean` and upload again.
+Default Freenove shipping build:
 
-Then set up OpenFIRE itself (pairing, calibration, profiles) with the standard [OpenFIRE App](https://github.com/TeamOpenFIRE/OpenFIRE-App) — from the app's point of view this is an ordinary OpenFIRE gun.
-
-## Verification, tuning and calibration
-
-The shipping build carries **no diagnostic serial output** (one boot banner line only). All telemetry, the live dashboard stream, and the runtime tuning console are compiled into a separate, otherwise-identical environment:
-
-```
-pio run -e diag -t upload
+```bash
+pio run -t upload
 ```
 
-**See [`docs/CALIBRATION.md`](docs/CALIBRATION.md)** for the full workflow: reactivating the serial monitor, tuning threshold/exposure to your room with `tools/dashboard.py`, scoring the result with `tools/health.py`, making a tune permanent, and returning to the shipping build.
+XIAO ESP32S3 Sense shipping build:
 
-## Bring-up order (recommended)
+```bash
+pio run -e combined_xiao_s3_sense -t upload
+```
 
-1. **Harness first**: `cd harness && pio run -t upload`. This runs the camera stack alone with full telemetry — if the 4 points aren't rock-solid here, fix that before involving OpenFIRE.
-2. **Diag build**: verify the same detection quality with OpenFIRE running (`pio run -e diag -t upload`, then `tools/health.py`).
-3. **Shipping build**: `pio run -t upload`, calibrate in the OpenFIRE app, play.
+Diagnostic variants are available as:
+
+```bash
+pio run -e diag_s3_freenove -t upload
+pio run -e diag_xiao_s3_sense -t upload
+```
+
+---
+
+## Recommended development workflow
+
+1. **Harness first** — verify the camera and detector independently.
+2. **Diagnostic OpenFIRE build** — confirm tracking behavior with the full firmware stack.
+3. **Shipping build** — validate the actual gameplay path.
+4. **Real game test** — evaluate aiming, stability, calibration, and tuning before optimizing further.
+
+Useful tools:
+
+- `tools/dashboard.py` — live camera/tracking visualization and tuning.
+- `tools/health.py` — capture and tracking health scoring.
+- `tools/screen_pattern.html` — visible-screen border and fiducial patterns.
+- `docs/CALIBRATION.md` — detailed calibration and tuning notes.
+
+---
 
 ## Host tests
 
-The geometry code is testable without hardware:
+The geometry and visible-screen detector can be tested without hardware.
 
+Example:
+
+```bash
+g++ -std=c++17 -O2 -Ilib/OV2640Capture \
+    -o test_screen_detector \
+    test/test_screen_detector.cpp \
+    lib/OV2640Capture/screen_detector.cpp
+
+./test_screen_detector
 ```
-g++ -std=c++17 -O2 -Ilib/OV2640Capture -o test_quad \
-    test/test_quad_resolver.cpp lib/OV2640Capture/quad_resolver.cpp && ./test_quad
-```
 
-22 scenarios, including off-screen reload at a new angle, junk-blob rejection during re-acquire, and blackout-while-moving recovery.
+The roadmap includes adding CI later so supported firmware targets and host tests are exercised automatically on every change.
 
-## License
+---
 
-This project: **GPL-3.0** (see `LICENSE`) — it is designed to be compiled together with OpenFIRE, which is GPL. The vendored `lib/esp32-camera-ov2640/` driver remains **Apache-2.0** (Espressif and contributors); modified files are listed in `lib/esp32-camera-ov2640/MODIFICATIONS.md` and keep their original headers.
+## Licensing
+
+This repository's own code is licensed under **GPL-3.0**; see [`LICENSE`](LICENSE).
+
+OpenFIRE is a separate upstream project and is licensed under **LGPL-2.1**. It is not included in this repository. Developers clone it locally into the ignored `OpenFIRE-Firmware-ESP32/` directory and remain responsible for complying with the upstream project's license terms when redistributing binaries or derivative work.
+
+The vendored Espressif camera-driver code under `lib/esp32-camera-ov2640/` retains its original **Apache-2.0** licensing and headers; project-specific modifications should continue to preserve those notices.
