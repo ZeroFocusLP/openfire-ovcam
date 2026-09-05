@@ -24,6 +24,7 @@
 #include <Arduino.h>
 #include "DFRobotIRPositionEx.h"
 #include "ov2640_capture.h"
+#include "screen_detector.h"
 
 extern "C" {
     extern volatile uint32_t cam_patch_stitch_rej;
@@ -73,6 +74,8 @@ void setup() {
     bool ok = cam.begin(400000, DFRobotIRPositionEx::DataFormat_Basic,
                         DFRobotIRPositionEx::Sensitivity_Default);
     Serial.printf("shim begin: %s\n", ok ? "OK (capture booted)" : "FAILED");
+    Serial.printf("track mode: %s (type 'mode=border', 'mode=fiducial', or 'mode=ir' to switch)\n",
+                  ov2640_get_track_mode_name());
     Serial.println("harness v3: J=anomaly (native px), G=gate counters (1Hz), P=stream (15Hz)");
 }
 
@@ -177,10 +180,20 @@ void loop() {
         Serial.printf("S,%lu,px~=%u/%u/%u/%u\n", (unsigned long)now,
             (unsigned)prevf.area4[0] * 16u, (unsigned)prevf.area4[1] * 16u,
             (unsigned)prevf.area4[2] * 16u, (unsigned)prevf.area4[3] * 16u);
-        Serial.printf("G,%lu,fps=%lu,polls=%lu,fresh=%lu,vsync=%luus,J/s=%lu\n",
-            (unsigned long)now, (unsigned long)frames, (unsigned long)polls,
+        Serial.printf("G,%lu,fps=%lu,mode=%s,t_det=%luus,polls=%lu,fresh=%lu,vsync=%luus,J/s=%lu\n",
+            (unsigned long)now, (unsigned long)frames,
+            ov2640_get_track_mode_name(),
+            (unsigned long)ov2640_get_detect_us(),
+            (unsigned long)polls,
             (unsigned long)fresh, (unsigned long)cam_patch_vsync_isr_period_us,
             (unsigned long)jlines);
+        screen_stats_t sstats;
+        screen_detector_get_stats(&sstats);
+        Serial.printf("M,%lu,min=%u,max=%u,avg=%u,thr=%u,rays=%u/%u/%u/%u,peaks=%u/%u/%u/%u\n",
+            (unsigned long)now,
+            sstats.min_px, sstats.max_px, sstats.avg_px, sstats.active_thr,
+            sstats.n_top, sstats.n_bot, sstats.n_left, sstats.n_right,
+            sstats.peak[0], sstats.peak[1], sstats.peak[2], sstats.peak[3]);
         // v28: rejP/rejM removed with the VSYNC-period and start-marker gates.
         Serial.printf("R,%lu,rejS=%lu,stitch=%lu,ovfE=%lu,ovfV=%lu\n",
             (unsigned long)now,

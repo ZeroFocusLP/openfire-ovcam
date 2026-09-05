@@ -201,6 +201,7 @@ private:
         // v26: TRUE capture-to-consumption latency, measured at the exact point
         // OpenFIRE takes the data rather than inferred from a budget. This is
         // the number that says whether perceived lag is ours or theirs.
+#if defined(ESP_PLATFORM)
         {
             const uint32_t age = (uint32_t)esp_timer_get_time() - ov2640_pub_t_us;
             if (age < 1000000u) {                       // ignore boot/wrap
@@ -208,6 +209,7 @@ private:
                 if (age > ov2640_shim_lat_us) ov2640_shim_lat_us = age;
             }
         }
+#endif
         unsigned int flags = 0;
         for (int i = 0; i < 4; ++i) {
             if (i < f.count) {

@@ -19,6 +19,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_heap_caps.h"      // v16: MEM line (PSRAM presence + DRAM headroom)
+#include "screen_detector.h"
 
 // Freenove S3-WROOM CAM pin map (matches firmware/src/board_esp32s3.h)
 #define P_XCLK 15
@@ -384,45 +385,114 @@ static BlobResult lab_filter_blobs(const BlobResult& in,
 // (xTaskGetHandle needs INCLUDE_xTaskGetHandle; this does not).
 static volatile TaskHandle_t s_cam_task = nullptr;
 
+#ifndef DEFAULT_TRACK_MODE
+#define DEFAULT_TRACK_MODE TRACK_MODE_SCREEN_FIDUCIAL
+#endif
+
+static volatile track_mode_t s_track_mode = DEFAULT_TRACK_MODE;
+static volatile uint32_t s_screen_detect_us = 0;
+
+extern "C" void ov2640_set_track_mode(track_mode_t mode) {
+    s_track_mode = mode;
+    if (s_sensor) {
+        if (mode == TRACK_MODE_IR_BLOBS) {
+            // Restore IR settings
+            s_sensor->set_exposure_ctrl(s_sensor, 0);
+            s_sensor->set_gain_ctrl(s_sensor, 0);
+            s_sensor->set_aec_value(s_sensor, 40);
+            s_sensor->set_agc_gain(s_sensor, 2);
+            s_cfg_aec = 40; s_cfg_agc = 2;
+            THR = 80;
+        } else {
+            // Visible screen settings: higher exposure and gain for LCD/OLED
+            s_sensor->set_exposure_ctrl(s_sensor, 0);
+            s_sensor->set_gain_ctrl(s_sensor, 0);
+            s_sensor->set_aec_value(s_sensor, 300);
+            s_sensor->set_agc_gain(s_sensor, 10);
+            s_cfg_aec = 300; s_cfg_agc = 10;
+            THR = 0;
+            screen_detector_set_threshold(THR);
+        }
+    }
+}
+
+extern "C" track_mode_t ov2640_get_track_mode(void) {
+    return s_track_mode;
+}
+
+extern "C" const char* ov2640_get_track_mode_name(void) {
+    switch (s_track_mode) {
+        case TRACK_MODE_SCREEN_BORDER: return "border";
+        case TRACK_MODE_SCREEN_FIDUCIAL: return "fiducial";
+        case TRACK_MODE_IR_BLOBS: default: return "ir";
+    }
+}
+
+extern "C" uint32_t ov2640_get_detect_us(void) {
+    return s_screen_detect_us;
+}
+
 static void on_chunk(const uint8_t* base, size_t len, bool frame_end)
 {
     if (!s_cam_task) s_cam_task = xTaskGetCurrentTaskHandle();
     static size_t prev_len = 0;
     static bool began = false;
-    // v28: the frame-TIMING gate that used to live here (start marker, VSYNC
-    // period EMA, FGATE_US outlier test) computed s_marked/s_suspect on every
-    // frame start -- and the only code that ever READ them was the full-stack
-    // path, now removed. It was 135 evaluations a second feeding nothing. The
-    // size gate below is the one the lab actually has, and it stays.
+
     if (len == 0) {                                  // explicit frame start
-        blobstream_begin(FRAME_W, THR, MIN_PX, MAX_PX, PX_BUDGET);
+        if (s_track_mode == TRACK_MODE_IR_BLOBS)
+            blobstream_begin(FRAME_W, THR, MIN_PX, MAX_PX, PX_BUDGET);
         began = true; prev_len = 0;
         return;
     }
     if (!began || len < prev_len) {
-        blobstream_begin(FRAME_W, THR, MIN_PX, MAX_PX, PX_BUDGET);
+        if (s_track_mode == TRACK_MODE_IR_BLOBS)
+            blobstream_begin(FRAME_W, THR, MIN_PX, MAX_PX, PX_BUDGET);
         began = true;
     }
-    blobstream_feed(base, len);
+    if (s_track_mode == TRACK_MODE_IR_BLOBS) {
+        blobstream_feed(base, len);
+    }
     prev_len = len;
     if (frame_end) {
-        // Pipeline: detector -> filter -> publish. No stabilizer, no deskew.
-        //
-        // SHORT-FRAME GEOMETRY: a short frame is missing lines because capture
-        // restarted late -- the surviving rows are SHIFTED, so every y carries
-        // an unknown offset. Such a frame is fine to look at but must not feed
-        // the aim stream (the driver is built with PATCH_ACCEPT_SHORT_FRAMES
-        // and deliberately delivers frames >=90% complete, so these frames are
-        // common). Keep last-good instead of publishing a silently-displaced
-        // one. Symptom when this rule is missing: points shift vertically for
-        // a moment -- one, two, or all four depending on where the missing
-        // rows land -- and snap back.
         const size_t lab_full = (size_t)FRAME_W * (size_t)FRAME_H;
         if (len != lab_full) {
             ov2640_stat_rej_size++;              // counted, never published
             began = false; prev_len = 0;
             return;                              // keep last-good, like the lab
         }
+
+        // ---- VISIBLE LIGHT SCREEN TRACKING PATH ----
+        if (s_track_mode == TRACK_MODE_SCREEN_BORDER || s_track_mode == TRACK_MODE_SCREEN_FIDUCIAL) {
+            screen_mode_t smode = (s_track_mode == TRACK_MODE_SCREEN_BORDER) ? SCREEN_MODE_BORDER : SCREEN_MODE_FIDUCIAL;
+            screen_result_t sres = screen_detect(base, FRAME_W, FRAME_H, smode);
+            s_screen_detect_us = sres.dt_us;
+            ov2640_bridge_frame_t lf = {};
+            lf.frame_w = FRAME_W; lf.frame_h = FRAME_H;
+            lf.count = (sres.valid ? sres.count : 0);
+            for (int i = 0; i < lf.count; ++i) {
+                float cx = sres.p[i].x, cy = sres.p[i].y;
+                if (cx < 0) cx = 0; if (cy < 0) cy = 0;
+                uint32_t x16 = (uint32_t)(cx * 16.0f + 0.5f);
+                uint32_t y16 = (uint32_t)(cy * 16.0f + 0.5f);
+                const uint32_t xm = FRAME_W * 16u - 1u, ym = FRAME_H * 16u - 1u;
+                lf.x16[i] = (uint16_t)(x16 > xm ? xm : x16);
+                lf.y16[i] = (uint16_t)(y16 > ym ? ym : y16);
+                lf.area4[i] = 8;
+            }
+            lf.frame_seq = ++s_frame_seq;
+            ov2640_pub_t_us = (uint32_t)esp_timer_get_time();
+            {
+                static uint8_t s_prev_pub_count = 255;
+                s_pub_hist[lf.count > 4 ? 4 : lf.count]++;
+                if (s_prev_pub_count != 255 && lf.count != s_prev_pub_count)
+                    s_pub_churn++;
+                s_prev_pub_count = lf.count;
+            }
+            ov2640_bridge_publish(&lf);
+            began = false; prev_len = 0;
+            return;
+        }
+
         static BlobResult lr;
         static BlobResult raw_lr;
         raw_lr = blobstream_finish();
@@ -1095,9 +1165,11 @@ int ov2640_capture_start(void)
         rc |= s->set_lenc(s, 0);     rc |= s->set_raw_gma(s, 0);
         rc |= s->set_bpc(s, 0);      rc |= s->set_wpc(s, 0);   // v3: low gain => off (lab law agc<16)
         rc |= s->set_hmirror(s, 0);  rc |= s->set_vflip(s, 0);
-        rc |= s->set_gain_ctrl(s, 0);     rc |= s->set_agc_gain(s, BOOT_AGC);  // v21
+        int init_aec = (s_track_mode == TRACK_MODE_IR_BLOBS) ? BOOT_AEC : 300;
+        int init_agc = (s_track_mode == TRACK_MODE_IR_BLOBS) ? BOOT_AGC : 10;
+        rc |= s->set_gain_ctrl(s, 0);     rc |= s->set_agc_gain(s, init_agc);  // v21
         rc |= s->set_exposure_ctrl(s, 0); rc |= s->set_aec2(s, 0);
-        rc |= s->set_aec_value(s, BOOT_AEC);         // v21: see the BOOT RECIPE block
+        rc |= s->set_aec_value(s, init_aec);         // v21: see the BOOT RECIPE block
         // (period-doubling note: tracks scene darkness, not aec; the v9 frame
         // gate rejects those frames — 2 events in 12s seen on the LED bench,
         // both would be gated.)
@@ -1126,6 +1198,12 @@ int ov2640_capture_start(void)
     if (s && tries >= 3)
         printf("!! SCCB: recipe NEVER fully ACKed - the sensor is mis-programmed "
                "and every measurement after this line is suspect\n");
+    s_cfg_aec = (s_track_mode == TRACK_MODE_IR_BLOBS) ? BOOT_AEC : 300;
+    s_cfg_agc = (s_track_mode == TRACK_MODE_IR_BLOBS) ? BOOT_AGC : 10;
+    if (s_track_mode != TRACK_MODE_IR_BLOBS) {
+        THR = 0;
+        screen_detector_set_threshold(THR);
+    }
 #if OV_DASH_OWN_UART0
     // Take UART0's RX so the dashboard can send commands while OpenFIRE owns
     // the USB CDC. TX buffer 0 on purpose: we never write through the driver,
@@ -1154,15 +1232,35 @@ extern "C" void ov2640_tune(const char* cmd)
         while (*p && *p != '=' && *p != '&' && ki < 7) key[ki++] = *p++;
         if (*p != '=') { while (*p && *p != '&') ++p; if (*p) ++p; continue; }
         ++p;
-        int val = 0; bool any = false;
-        while (*p >= '0' && *p <= '9') { val = val * 10 + (*p++ - '0'); any = true; }
+        char val_str[16] = {0}; int vi = 0;
+        const char* val_start = p;
+        while (*p && *p != '&' && vi < 15) val_str[vi++] = *p++;
         while (*p && *p != '&') ++p;
         if (*p) ++p;
-        if (!any) continue;
-        if (!strcmp(key, "thr")) {
-            if (val < 8)   val = 8;
+
+        int val = 0; bool any = false;
+        const char* vp = val_start;
+        while (*vp >= '0' && *vp <= '9') { val = val * 10 + (*vp++ - '0'); any = true; }
+
+        if (!strcmp(key, "mode") || !strcmp(key, "track")) {
+            if (!strcmp(val_str, "border") || (any && val == 1)) {
+                ov2640_set_track_mode(TRACK_MODE_SCREEN_BORDER);
+            } else if (!strcmp(val_str, "fiducial") || (any && val == 2)) {
+                ov2640_set_track_mode(TRACK_MODE_SCREEN_FIDUCIAL);
+            } else if (!strcmp(val_str, "ir") || (any && val == 0)) {
+                ov2640_set_track_mode(TRACK_MODE_IR_BLOBS);
+            }
+        } else if (!strcmp(key, "auto")) {
+            if (s_sensor) {
+                s_sensor->set_exposure_ctrl(s_sensor, val ? 1 : 0);
+                s_sensor->set_gain_ctrl(s_sensor, val ? 1 : 0);
+                s_sensor->set_aec2(s_sensor, val ? 1 : 0);
+            }
+        } else if (!strcmp(key, "thr")) {
+            if (val < 0)   val = 0;
             if (val > 250) val = 250;
             THR = (uint8_t)val;
+            screen_detector_set_threshold(THR);
         } else if (!strcmp(key, "res")) {
             // v27: 0 = off, 1 = resolver on top-4-by-mass, 2 = resolver picks
             // four from up to 8 by geometry (default). A/B live.
@@ -1203,8 +1301,9 @@ extern "C" void ov2640_tune(const char* cmd)
     }
     // "CMD ok" prefix: dashboard.py runs parse_kv() on it, so its panel picks
     // the new values up immediately instead of waiting for the next STAT.
-    printf("CMD ok (tune) | thr=%u aec=%d agc=%d boost=%d | mode=LAB dash=%u "
+    printf("CMD ok (tune) | track=%s thr=%u aec=%d agc=%d boost=%d | mode=LAB dash=%u "
            "dashb=%u dashhz=%lu drvgate=%u res=%u coin=%u\n",
+           ov2640_get_track_mode_name(),
            (unsigned)THR, s_cfg_aec, s_cfg_agc, s_cfg_boost,
            (unsigned)s_dash, (unsigned)s_dash_blob,
            (unsigned long)(s_dash_min_dt_us ? 1000000u / s_dash_min_dt_us : 0),

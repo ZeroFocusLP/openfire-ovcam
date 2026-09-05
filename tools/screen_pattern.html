@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>OpenFIRE Visible-Light Screen Pattern Generator</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body, html { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: monospace; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #hud {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      color: #0f0;
+      background: rgba(0, 0, 0, 0.75);
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.5;
+      pointer-events: none;
+      transition: opacity 0.3s;
+      z-index: 100;
+    }
+    #hud.hidden { opacity: 0; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <b>OpenFIRE Screen Pattern Benchmark</b><br>
+    Mode: <span id="modeName">1 - Rectangular Border + Top Notch</span><br>
+    Border: <span id="borderWidth">24</span>px | Polarity: <span id="polarity">White on Black</span><br>
+    [F] Fullscreen | [1/2/3] Modes | [+/-] Width | [B] Invert | [H] Hide HUD
+  </div>
+  <canvas id="canvas"></canvas>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const hud = document.getElementById('hud');
+    const modeName = document.getElementById('modeName');
+    const borderWidthEl = document.getElementById('borderWidth');
+    const polarityEl = document.getElementById('polarity');
+
+    let mode = 1; // 1: Border + Notch, 2: 4 Corner Fiducials, 3: Corner L-Brackets
+    let borderWidth = 24;
+    let whiteOnBlack = true;
+    let hudVisible = true;
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      draw();
+    }
+    window.addEventListener('resize', resize);
+
+    function draw() {
+      const W = canvas.width;
+      const H = canvas.height;
+      const fg = whiteOnBlack ? '#FFFFFF' : '#000000';
+      const bg = whiteOnBlack ? '#000000' : '#FFFFFF';
+
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = fg;
+      ctx.strokeStyle = fg;
+
+      const bw = borderWidth;
+
+      if (mode === 1) {
+        // Mode 1: Continuous Rectangular Border with Top-Edge Notch / Asymmetry
+        modeName.textContent = '1 - Border with Top Orientation Notch';
+        // Left
+        ctx.fillRect(0, 0, bw, H);
+        // Right
+        ctx.fillRect(W - bw, 0, bw, H);
+        // Bottom
+        ctx.fillRect(0, H - bw, W, bw);
+        // Top border
+        ctx.fillRect(0, 0, W, bw);
+        // Top orientation marker: a downward block at 35% from left (unmistakable asymmetry)
+        const markerW = Math.max(bw * 3, 60);
+        const markerH = bw * 1.5;
+        ctx.fillRect(Math.floor(W * 0.35 - markerW / 2), bw, markerW, markerH);
+
+      } else if (mode === 2) {
+        // Mode 2: 4 Corner Fiducials (large high-contrast squares with TL orientation beacon)
+        modeName.textContent = '2 - 4 Corner Fiducials + TL Satellite Beacon';
+        const boxSize = Math.max(bw * 2.5, 50);
+        const margin = Math.max(bw, 20);
+
+        // Top-Left (TL)
+        ctx.fillRect(margin, margin, boxSize, boxSize);
+        // Satellite orientation beacon next to TL (offset horizontally)
+        ctx.fillRect(margin + boxSize + 15, margin, boxSize * 0.4, boxSize * 0.4);
+
+        // Top-Right (TR)
+        ctx.fillRect(W - margin - boxSize, margin, boxSize, boxSize);
+
+        // Bottom-Right (BR)
+        ctx.fillRect(W - margin - boxSize, H - margin - boxSize, boxSize, boxSize);
+
+        // Bottom-Left (BL)
+        ctx.fillRect(margin, H - margin - boxSize, boxSize, boxSize);
+
+      } else if (mode === 3) {
+        // Mode 3: Corner L-brackets / Chevrons
+        modeName.textContent = '3 - Corner L-Brackets';
+        const armLen = Math.max(bw * 4, 100);
+        const margin = Math.max(bw / 2, 10);
+
+        // TL (double bracket on TL for orientation)
+        ctx.fillRect(margin, margin, armLen, bw);
+        ctx.fillRect(margin, margin, bw, armLen);
+        ctx.fillRect(margin + bw * 1.5, margin + bw * 1.5, armLen * 0.5, bw * 0.6);
+        ctx.fillRect(margin + bw * 1.5, margin + bw * 1.5, bw * 0.6, armLen * 0.5);
+
+        // TR
+        ctx.fillRect(W - margin - armLen, margin, armLen, bw);
+        ctx.fillRect(W - margin - bw, margin, bw, armLen);
+
+        // BR
+        ctx.fillRect(W - margin - armLen, H - margin - bw, armLen, bw);
+        ctx.fillRect(W - margin - bw, H - margin - armLen, bw, armLen);
+
+        // BL
+        ctx.fillRect(margin, H - margin - bw, armLen, bw);
+        ctx.fillRect(margin, H - margin - armLen, bw, armLen);
+      }
+
+      borderWidthEl.textContent = borderWidth;
+      polarityEl.textContent = whiteOnBlack ? 'White on Black' : 'Black on White';
+    }
+
+    window.addEventListener('keydown', (e) => {
+      switch (e.key) {
+        case 'f':
+        case 'F':
+          if (!document.fullscreenElement) {
+            document.documentElement.requestFullscreen().catch(() => {});
+          } else {
+            document.exitFullscreen().catch(() => {});
+          }
+          break;
+        case '1': mode = 1; draw(); break;
+        case '2': mode = 2; draw(); break;
+        case '3': mode = 3; draw(); break;
+        case '+':
+        case '=':
+          borderWidth = Math.min(80, borderWidth + 4);
+          draw();
+          break;
+        case '-':
+        case '_':
+          borderWidth = Math.max(8, borderWidth - 4);
+          draw();
+          break;
+        case 'b':
+        case 'B':
+        case 'i':
+        case 'I':
+          whiteOnBlack = !whiteOnBlack;
+          draw();
+          break;
+        case 'h':
+        case 'H':
+          hudVisible = !hudVisible;
+          hud.classList.toggle('hidden', !hudVisible);
+          break;
+      }
+    });
+
+    resize();
+  </script>
+</body>
+</html>
