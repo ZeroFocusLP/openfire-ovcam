@@ -25,6 +25,15 @@ All notable changes, architectural decisions, and hardware integrations for **Op
   - **Inputs**: Trigger (GPIO 1 / D0), Button A (GPIO 2 / D1), Button B (GPIO 3 / D2), Button C (GPIO 4 / D3), Start (GPIO 44 / D7), Select (GPIO 9 / D10).
   - **Outputs (Haptics/Feedback)**: Solenoid (GPIO 7 / D8) and Rumble motor (GPIO 8 / D9) allocated to expansion pins.
   - **Pedal**: Unmapped (`-1`) to conserve GPIOs.
+- **Product-validation roadmap refresh**:
+  - Promoted real-game visible-screen testing to the immediate next milestone.
+  - Added calibration/tuning and gameplay robustness benchmarking ahead of further camera FPS optimization.
+  - Kept IMU, 60 FPS camera work, OLED, physical integration, and manufacturing preparation on the roadmap but moved them after gameplay validation.
+  - Added future CI and reproducible-developer-setup milestones.
+- **Documentation cleanup**:
+  - Reworked the README around the current IR-free visible-screen direction while keeping conventional IR tracking documented as a fallback.
+  - Clarified that `OpenFIRE-Firmware-ESP32/` is an intentional local git-ignored checkout rather than vendored code or a tracked submodule.
+  - Corrected the licensing description: this repository remains GPL-3.0, OpenFIRE upstream is LGPL-2.1, and the Espressif camera-driver code retains Apache-2.0 notices.
 
 ### Verified & Tested
 - **Hardware Flashing & Enumeration**:
@@ -56,7 +65,7 @@ All notable changes, architectural decisions, and hardware integrations for **Op
 
 ### Added
 - **Initial OpenFIRE Camera Overlay**:
-  - Integrated `OpenFIRE-Firmware-ESP32` as submodule.
+  - Integrated `OpenFIRE-Firmware-ESP32` as a local build dependency.
   - Implemented DMA ring buffer capture shim for OV2640 (`lib/OV2640Capture/`).
   - Implemented DFRobot IR positioning shim (`DFRobotIRPositionEx_OV2640`) translating camera coordinates into OpenFIRE bridge frames.
   - Added `tools/dashboard.py` real-time visualization and tuning utility over serial.
